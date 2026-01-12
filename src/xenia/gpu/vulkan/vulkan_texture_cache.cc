@@ -1,4 +1,4 @@
-/**
+﻿/**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
@@ -514,7 +514,7 @@ VulkanTextureCache::~VulkanTextureCache() {
 
 void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
   TextureCache::BeginSubmission(new_submission_index);
-
+  
   if (!null_images_cleared_) {
     VkImage null_images[] = {null_image_2d_array_cube_, null_image_3d_};
     VkImageSubresourceRange null_image_subresource_range(
@@ -558,7 +558,7 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-
+  XELOGGPU("i am beingh called");
   TextureCache::RequestTextures(used_texture_mask);
 
   // Transition the textures into the needed usage.
@@ -620,25 +620,169 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
 VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(
     uint32_t fetch_constant_index, xenos::FetchOpDimension dimension,
     bool is_signed) const {
-  VkImageView image_view = VK_NULL_HANDLE;
+  // Resolve the texture binding for this fetch constant.
   const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
-  if (binding && AreDimensionsCompatible(dimension, binding->key.dimension)) {
-    const VulkanTextureBinding& vulkan_binding =
-        vulkan_texture_bindings_[fetch_constant_index];
-    image_view = is_signed ? vulkan_binding.image_view_signed
-                           : vulkan_binding.image_view_unsigned;
+  if (!binding) {
+    // No binding at all – fall back to null views.
+    switch (dimension) {
+      case xenos::FetchOpDimension::k3DOrStacked:
+        return null_image_view_3d_;
+      case xenos::FetchOpDimension::kCube:
+        return null_image_view_cube_;
+      default:
+        return null_image_view_2d_array_;
+    }
   }
-  if (image_view != VK_NULL_HANDLE) {
-    return image_view;
+
+  // --- force_special_view is effectively always ON here ---
+
+  // Choose the texture based on signedness.
+  Texture* texture = nullptr;
+  if (is_signed) {
+    texture =
+        binding->texture_signed ? binding->texture_signed : binding->texture;
+  } else {
+    texture = binding->texture;
   }
-  switch (dimension) {
-    case xenos::FetchOpDimension::k3DOrStacked:
-      return null_image_view_3d_;
-    case xenos::FetchOpDimension::kCube:
-      return null_image_view_cube_;
-    default:
-      return null_image_view_2d_array_;
+
+  if (!texture) {
+    // Binding exists but no actual texture object – use null views.
+    switch (dimension) {
+      case xenos::FetchOpDimension::k3DOrStacked:
+        return null_image_view_3d_;
+      case xenos::FetchOpDimension::kCube:
+        return null_image_view_cube_;
+      default:
+        return null_image_view_2d_array_;
+    }
   }
+
+  VulkanTexture* vk_tex = static_cast<VulkanTexture*>(texture);
+  const TextureKey& key = binding->key;
+
+  // If this is a true 3D texture, convert / reinterpret via a 2D helper.
+  if (key.dimension == xenos::DataDimension::k3D) {
+    //XELOGI(
+      //  "VK GetActiveBindingOrNullImageView fc={} : forcing special 2D view "
+        //"for 3D texture (w={} h={} d={} mips={})",
+        //fetch_constant_index, key.width_minus_1 + 1, key.height_minus_1 + 1,
+        //y.depth_or_array_size_minus_1 + 1, key.mip_max_level + 1);
+
+    VulkanTexture* converted = vk_tex->GetOrCreate3DAs2DTexture(
+        const_cast<VulkanTextureCache&>(*this));
+    if (converted) {
+      vk_tex = converted;
+    } else {
+      // Failed to create the special texture – bail out to null.
+      switch (dimension) {
+        case xenos::FetchOpDimension::k3DOrStacked:
+          return null_image_view_3d_;
+        case xenos::FetchOpDimension::kCube:
+          return null_image_view_cube_;
+        default:
+          return null_image_view_2d_array_;
+      }
+    }
+  }
+
+  // Always treat this as a 2DOrStacked-style view in "special" mode.
+  // D3D side passes is_array=true in its force_special_view path.
+  bool is_array = true;
+
+  VkImageView view =
+      vk_tex->GetView(is_signed, binding->host_swizzle, is_array);
+
+  if (!view) {
+    // View creation failed – fall back to null.
+    switch (dimension) {
+      case xenos::FetchOpDimension::k3DOrStacked:
+        return null_image_view_3d_;
+      case xenos::FetchOpDimension::kCube:
+        return null_image_view_cube_;
+      default:
+        return null_image_view_2d_array_;
+    }
+  }
+
+  return view;
+}
+
+VulkanTextureCache::VulkanTexture*
+VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DTexture(
+    VulkanTextureCache& texture_cache) {
+  // If already created, just reuse it.
+  if (texture_3d_as_2d_) {
+    return texture_3d_as_2d_.get();
+  }
+
+  // Only valid for 3D resources.
+  if (key().dimension != xenos::DataDimension::k3D) {
+    return nullptr;
+  }
+
+  // Build a key for a 2D, slice-0, mip-0 version.
+  TextureKey key_load = key();
+  key_load.depth_or_array_size_minus_1 = 0;
+  key_load.mip_max_level = 0;
+
+  const uint32_t width = key_load.GetWidth();
+  const uint32_t height = key_load.GetHeight();
+
+  // Choose the host format using existing logic.
+  const HostFormatPair& host_format_pair =
+      texture_cache.GetHostFormatPair(key_load);
+  const HostFormat& host_format_unsigned = host_format_pair.format_unsigned;
+
+  VkFormat vk_format = host_format_unsigned.format;
+  if (vk_format == VK_FORMAT_UNDEFINED) {
+    return nullptr;
+  }
+
+  // Create a 2D image.
+  VkImageCreateInfo image_info{};
+  image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  image_info.imageType = VK_IMAGE_TYPE_2D;
+  image_info.format = vk_format;
+  image_info.extent.width = width;
+  image_info.extent.height = height;
+  image_info.extent.depth = 1;
+  image_info.mipLevels = 1;
+  image_info.arrayLayers = 1;
+  image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  image_info.usage =
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+
+  VkImage image_2d = VK_NULL_HANDLE;
+  VmaAllocation allocation_2d = VK_NULL_HANDLE;
+
+  VmaAllocationCreateInfo alloc_info{};
+  alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+  if (vmaCreateImage(texture_cache.vma_allocator_, &image_info, &alloc_info,
+                     &image_2d, &allocation_2d, nullptr) != VK_SUCCESS) {
+    return nullptr;
+  }
+
+  // Wrap it as a VulkanTexture. Start usage as transfer destination; the cache
+  // will transition to whatever it needs later.
+  std::unique_ptr<VulkanTexture> texture_2d(
+      new VulkanTexture(texture_cache, key_load, image_2d, allocation_2d));
+  texture_2d->SetUsage(Usage::kTransferDestination);
+
+  // Load guest data (first slice, base mip only) into this 2D texture.
+  if (!texture_cache.LoadTextureDataFromResidentMemoryImpl(
+          *texture_2d, /*load_base=*/true, /*load_mips=*/false)) {
+    vmaDestroyImage(texture_cache.vma_allocator_, image_2d, allocation_2d);
+    return nullptr;
+  }
+
+  // The texture is now ready; the usual binding path will set its usage and
+  // emit barriers as for any other texture.
+  texture_3d_as_2d_ = std::move(texture_2d);
+  return texture_3d_as_2d_.get();
 }
 
 VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
@@ -1750,47 +1894,106 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   return true;
 }
 
-void VulkanTextureCache::UpdateTextureBindingsImpl(
-    uint32_t fetch_constant_mask) {
+void VulkanTextureCache::UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) 
+  {
+ 
+
   uint32_t bindings_remaining = fetch_constant_mask;
   uint32_t binding_index;
+
   while (xe::bit_scan_forward(bindings_remaining, &binding_index)) {
     bindings_remaining &= ~(UINT32_C(1) << binding_index);
+
     VulkanTextureBinding& vulkan_binding =
         vulkan_texture_bindings_[binding_index];
     vulkan_binding.Reset();
+
     const TextureBinding* binding = GetValidTextureBinding(binding_index);
     if (!binding) {
       continue;
+
     }
+    if (binding->fetch_dimension == xenos::FetchOpDimension::k2D &&
+        binding->resource_dimension == xenos::DataDimension::k3D) {
+      XELOGGPU(
+          "VK 3D→2D candidate: fetch_index=%u, fetch_dim=%u, resource_dim=%u, "
+          "texture=0x%llX, texture_signed=0x%llX, swizzle=0x%X",
+          binding_index, static_cast<uint32_t>(binding->fetch_dimension),
+          static_cast<uint32_t>(binding->resource_dimension),
+          static_cast<unsigned long long>(
+              reinterpret_cast<uintptr_t>(binding->texture)),
+          static_cast<unsigned long long>(
+              reinterpret_cast<uintptr_t>(binding->texture_signed)),
+          binding->host_swizzle);
+    }
+
+
+
+    // Helper: convert 3D → 2D slice-0 if shader fetches as 2D
+    auto get_effective_texture =
+        [&](Texture* tex) -> VulkanTexture* {
+          if (!tex) {
+            return nullptr;
+          }
+
+          VulkanTexture* vk_tex = static_cast<VulkanTexture*>(tex);
+
+          // 3D resource fetched as 2D → use slice-0 2D texture
+          if (binding->fetch_dimension == xenos::FetchOpDimension::k2D &&
+              binding->resource_dimension == xenos::DataDimension::k3D) {
+            return vk_tex->GetOrCreate3DAs2DTexture(*this);
+          }
+
+          return vk_tex;
+        };
+
+    // Signed-separate formats
     if (IsSignedVersionSeparateForFormat(binding->key)) {
-      if (binding->texture &&
-          texture_util::IsAnySignNotSigned(binding->swizzled_signs)) {
-        vulkan_binding.image_view_unsigned =
-            static_cast<VulkanTexture*>(binding->texture)
-                ->GetView(false, binding->host_swizzle);
-      }
-      if (binding->texture_signed &&
-          texture_util::IsAnySignSigned(binding->swizzled_signs)) {
-        vulkan_binding.image_view_signed =
-            static_cast<VulkanTexture*>(binding->texture_signed)
-                ->GetView(true, binding->host_swizzle);
-      }
-    } else {
-      VulkanTexture* texture = static_cast<VulkanTexture*>(binding->texture);
-      if (texture) {
-        if (texture_util::IsAnySignNotSigned(binding->swizzled_signs)) {
+      // Unsigned view
+      if (texture_util::IsAnySignNotSigned(binding->swizzled_signs)) {
+        VulkanTexture* tex_unsigned =
+            get_effective_texture(binding->texture);
+        if (tex_unsigned) {
           vulkan_binding.image_view_unsigned =
-              texture->GetView(false, binding->host_swizzle);
+              tex_unsigned->GetView(false, binding->host_swizzle);
         }
-        if (texture_util::IsAnySignSigned(binding->swizzled_signs)) {
+      }
+
+      // Signed view
+      if (texture_util::IsAnySignSigned(binding->swizzled_signs)) {
+        VulkanTexture* tex_signed =
+            get_effective_texture(binding->texture_signed);
+        if (tex_signed) {
           vulkan_binding.image_view_signed =
-              texture->GetView(true, binding->host_swizzle);
+              tex_signed->GetView(true, binding->host_swizzle);
         }
+      }
+    }
+
+    // Unified formats
+    else {
+      VulkanTexture* tex =
+          get_effective_texture(binding->texture);
+      if (!tex) {
+        continue;
+      }
+
+      if (texture_util::IsAnySignNotSigned(binding->swizzled_signs)) {
+        vulkan_binding.image_view_unsigned =
+            tex->GetView(false, binding->host_swizzle);
+      }
+      if (texture_util::IsAnySignSigned(binding->swizzled_signs)) {
+        vulkan_binding.image_view_signed =
+            tex->GetView(true, binding->host_swizzle);
       }
     }
   }
 }
+
+
+
+
+
 
 VulkanTextureCache::VulkanTexture::VulkanTexture(
     VulkanTextureCache& texture_cache, const TextureKey& key, VkImage image,

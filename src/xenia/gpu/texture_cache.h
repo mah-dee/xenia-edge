@@ -534,6 +534,10 @@ class TextureCache {
     // different on the host.
     Texture* texture_signed;
 
+    // NEW FIELDS
+    xenos::FetchOpDimension fetch_dimension = xenos::FetchOpDimension::k2D;
+    xenos::DataDimension resource_dimension = xenos::DataDimension::k2DOrStacked;
+
     TextureBinding() { Reset(); }
 
     void Reset() {

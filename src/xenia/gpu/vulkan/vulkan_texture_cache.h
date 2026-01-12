@@ -31,6 +31,7 @@ class VulkanTextureCache final : public TextureCache {
  public:
   // Sampler parameters that can be directly converted to a host sampler or used
   // for checking whether samplers bindings are up to date.
+ 
   union SamplerParameters {
     uint32_t value;
     struct {
@@ -80,7 +81,7 @@ class VulkanTextureCache final : public TextureCache {
   }
 
   ~VulkanTextureCache();
-
+ 
   void BeginSubmission(uint64_t new_submission_index) override;
 
   // Must be called within a frame - creates and untiles textures needed by
@@ -254,6 +255,9 @@ class VulkanTextureCache final : public TextureCache {
 
   class VulkanTexture final : public Texture {
    public:
+
+    VulkanTexture* GetOrCreate3DAs2DTexture(
+        VulkanTextureCache& texture_cache);
     enum class Usage {
       kUndefined,
       kTransferDestination,
@@ -280,6 +284,9 @@ class VulkanTextureCache final : public TextureCache {
                         bool is_array = true);
 
    private:
+    // Cached 2D texture of the first slice (mip 0) of a 3D texture.
+std::unique_ptr<VulkanTexture> texture_3d_as_2d_;
+
     union ViewKey {
       uint32_t key;
       struct {

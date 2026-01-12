@@ -717,7 +717,7 @@ class Shader {
     size_t binding_index;
     // Fetch constant index [0-31].
     uint32_t fetch_constant;
-    // Fetch instruction with all parameters.
+   // Fetch instruction with all parameters.
     ParsedTextureFetchInstruction fetch_instr;
   };
 
