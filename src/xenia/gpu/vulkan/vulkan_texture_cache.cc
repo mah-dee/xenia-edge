@@ -1804,22 +1804,7 @@ void VulkanTextureCache::UpdateTextureBindingsImpl(uint32_t fetch_constant_mask)
       continue;
 
     }
-    if (binding->fetch_dimension == xenos::FetchOpDimension::k2D &&
-        binding->resource_dimension == xenos::DataDimension::k3D) {
-      XELOGGPU(
-          "VK 3D→2D candidate: fetch_index=%u, fetch_dim=%u, resource_dim=%u, "
-          "texture=0x%llX, texture_signed=0x%llX, swizzle=0x%X",
-          binding_index, static_cast<uint32_t>(binding->fetch_dimension),
-          static_cast<uint32_t>(binding->resource_dimension),
-          static_cast<unsigned long long>(
-              reinterpret_cast<uintptr_t>(binding->texture)),
-          static_cast<unsigned long long>(
-              reinterpret_cast<uintptr_t>(binding->texture_signed)),
-          binding->host_swizzle);
-    }
-
-
-
+    
     // Helper: convert 3D → 2D slice-0 if shader fetches as 2D
     auto get_effective_texture =
         [&](Texture* tex) -> VulkanTexture* {
