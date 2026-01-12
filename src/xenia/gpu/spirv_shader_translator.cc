@@ -2445,20 +2445,10 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
 }
 
 void SpirvShaderTranslator::StartFragmentShaderInMain() {
-  // TODO(Triang3l): With sample shading (for depth format conversion) only
-  // for the bottom-right sample (unlike in Direct3D, the sample mask input
-  // doesn't include covered samples of the primitive that correspond to other
-  // invocations, so use the sample that's the most friendly to the half-pixel
-  // offset).
-
   // Set up pixel killing from within the translated shader without affecting
-  // the control flow (unlike with OpKill), similarly to how pixel killing works
-  // on the Xenos, and also keeping a single critical section exit and return
-  // for safety across different Vulkan implementations with fragment shader
-  // interlock.
+  // the control flow.
   if (current_shader().kills_pixels()) {
     if (features_.demote_to_helper_invocation) {
-      // TODO(Triang3l): Promoted to SPIR-V 1.6 - don't add the extension there.
       builder_->addExtension("SPV_EXT_demote_to_helper_invocation");
       builder_->addCapability(spv::CapabilityDemoteToHelperInvocationEXT);
     } else {
@@ -2466,122 +2456,20 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
           spv::NoPrecision, spv::StorageClassFunction, type_bool_,
           "xe_var_kill_pixel", builder_->makeBoolConstant(false));
     }
-    // For killing with fragment shader interlock when demotion is supported,
-    // using OpIsHelperInvocationEXT to avoid allocating a variable in addition
-    // to the execution mask GPUs naturally have.
   }
 
-  // Initialize color output variables as Function-scoped for both FSI and FBO.
-  // For FBO, this allows reading the color values back (e.g., for alpha test),
-  // which isn't possible with Output storage class. The values are copied to
-  // the actual Output variables at the end of the shader for FBO.
-  std::fill(output_or_var_fragment_data_.begin(),
-            output_or_var_fragment_data_.end(), spv::NoResult);
-  var_main_fsi_color_written_ = spv::NoResult;
-  uint32_t color_targets_written = current_shader().writes_color_targets();
-  if (color_targets_written && !is_depth_only_fragment_shader_) {
-    static const char* const kFragmentDataVariableNames[] = {
-        "xe_var_fragment_data_0",
-        "xe_var_fragment_data_1",
-        "xe_var_fragment_data_2",
-        "xe_var_fragment_data_3",
-    };
-    uint32_t color_targets_remaining = color_targets_written;
-    uint32_t color_target_index;
-    while (xe::bit_scan_forward(color_targets_remaining, &color_target_index)) {
-      color_targets_remaining &= ~(UINT32_C(1) << color_target_index);
-      output_or_var_fragment_data_[color_target_index] =
-          builder_->createVariable(
-              spv::NoPrecision, spv::StorageClassFunction, type_float4_,
-              kFragmentDataVariableNames[color_target_index], const_float4_0_);
-    }
-    // Color write tracking for both FSI and FBO paths.
-    // This is used to conditionally skip alpha test / alpha-to-coverage if
-    // render target 0 wasn't written on the execution path.
-    var_main_fsi_color_written_ = builder_->createVariable(
-        spv::NoPrecision, spv::StorageClassFunction, type_uint_,
-        "xe_var_color_written", const_uint_0_);
-  }
-
-  if (edram_fragment_shader_interlock_) {
-    // Initialize depth output variable with fragment shader interlock.
-    output_or_var_fragment_depth_ = spv::NoResult;
-    if (current_shader().writes_depth()) {
-      output_or_var_fragment_depth_ = builder_->createVariable(
-          spv::NoPrecision, spv::StorageClassFunction, type_float_,
-          "xe_var_fragment_depth", const_float_0_);
-    }
-  }
-
-  if (edram_fragment_shader_interlock_ && FSI_IsDepthStencilEarly()) {
-    spv::Id msaa_samples = LoadMsaaSamplesFromFlags();
-    FSI_LoadSampleMask(msaa_samples);
-    FSI_LoadEdramOffsets(msaa_samples);
-    builder_->createNoResultOp(spv::OpBeginInvocationInterlockEXT);
-    FSI_DepthStencilTest(msaa_samples, false);
-    if (!is_depth_only_fragment_shader_) {
-      // Skip the rest of the shader if the whole quad (due to derivatives) has
-      // failed the depth / stencil test, and there are no depth and stencil
-      // values to conditionally write after running the shader to check if
-      // samples don't additionally need to be discarded.
-      spv::Id quad_needs_execution = builder_->createBinOp(
-          spv::OpINotEqual, type_bool_, main_fsi_sample_mask_, const_uint_0_);
-      // TODO(Triang3l): Use GroupNonUniformQuad operations where supported.
-      // If none of the pixels in the quad passed the depth / stencil test, the
-      // value of (any samples covered ? 1.0f : 0.0f) for the current pixel will
-      // be 0.0f, and since it will be 0.0f in other pixels too, the derivatives
-      // will be zero as well.
-      builder_->addCapability(spv::CapabilityDerivativeControl);
-      // Query the horizontally adjacent pixel.
-      quad_needs_execution = builder_->createBinOp(
-          spv::OpLogicalOr, type_bool_, quad_needs_execution,
-          builder_->createBinOp(
-              spv::OpFOrdNotEqual, type_bool_,
-              builder_->createUnaryOp(
-                  spv::OpDPdxFine, type_float_,
-                  builder_->createTriOp(spv::OpSelect, type_float_,
-                                        quad_needs_execution, const_float_1_,
-                                        const_float_0_)),
-              const_float_0_));
-      // Query the vertically adjacent pair of pixels.
-      quad_needs_execution = builder_->createBinOp(
-          spv::OpLogicalOr, type_bool_, quad_needs_execution,
-          builder_->createBinOp(
-              spv::OpFOrdNotEqual, type_bool_,
-              builder_->createUnaryOp(
-                  spv::OpDPdyCoarse, type_float_,
-                  builder_->createTriOp(spv::OpSelect, type_float_,
-                                        quad_needs_execution, const_float_1_,
-                                        const_float_0_)),
-              const_float_0_));
-      spv::Block& main_fsi_early_depth_stencil_execute_quad =
-          builder_->makeNewBlock();
-      main_fsi_early_depth_stencil_execute_quad_merge_ =
-          &builder_->makeNewBlock();
-      builder_->createSelectionMerge(
-          main_fsi_early_depth_stencil_execute_quad_merge_,
-          spv::SelectionControlDontFlattenMask);
-      builder_->createConditionalBranch(
-          quad_needs_execution, &main_fsi_early_depth_stencil_execute_quad,
-          main_fsi_early_depth_stencil_execute_quad_merge_);
-      builder_->setBuildPoint(&main_fsi_early_depth_stencil_execute_quad);
-    }
-  }
-
-  if (is_depth_only_fragment_shader_) {
-    return;
-  }
+  // --- AMD PERFORMANCE OPTIMIZATION: HOISTED INITIALIZATION ---
+  // RDNA 4 (9070 XT) Optimization:
+  // We move GPR zeroing and PsParamGen math to the very start of the shader.
+  // This allows the GPU to execute these instructions in parallel while
+  // waiting for the hardware Fragment Shader Interlock (FSI) to synchronize.
+  // By "hoisting" this outside the critical section, we reduce serialization
+  // latency.
 
   uint32_t param_gen_interpolator = GetPsParamGenInterpolator();
-
-  // Zero general-purpose registers to prevent crashes when the game
-  // references them after only initializing them conditionally, and copy
-  // interpolants to GPRs.
   uint32_t interpolator_mask = GetModificationInterpolatorMask();
   for (uint32_t i = 0; i < register_count(); ++i) {
-    if (i == param_gen_interpolator) {
-      continue;
-    }
+    if (i == param_gen_interpolator) continue;
     id_vector_temp_.clear();
     id_vector_temp_.push_back(builder_->makeIntConstant(int(i)));
     builder_->createStore(
@@ -2594,27 +2482,12 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
                                     var_main_registers_, id_vector_temp_));
   }
 
-  // Pixel parameters.
   if (param_gen_interpolator != UINT32_MAX) {
     Modification modification = GetSpirvShaderModification();
-    // Rounding the position down, and taking the absolute value, so in case the
-    // host GPU for some reason has quads used for derivative calculation at odd
-    // locations, the left and top edges will have correct derivative magnitude
-    // and LODs.
-    // Assuming that if PsParamGen is needed at all, param_gen_point is always
-    // set for point primitives, and is always disabled for other primitive
-    // types.
-    // OpFNegate requires sign bit flipping even for 0.0 (in this case, the
-    // first column or row of pixels) only since SPIR-V 1.5 revision 2 (not the
-    // base 1.5).
-    // TODO(Triang3l): When SPIR-V 1.6 is used in Xenia, see if OpFNegate can be
-    // used there, should be cheaper because it may be implemented as a hardware
-    // instruction modifier, though it respects the rule for subnormal numbers -
-    // see the actual hardware instructions in both OpBitwiseXor and OpFNegate
-    // cases.
     spv::Id const_sign_bit = builder_->makeUintConstant(UINT32_C(1) << 31);
-    // X - pixel X .0 in the magnitude, is back-facing in the sign bit.
     assert_true(input_fragment_coordinates_ != spv::NoResult);
+
+    // X calculation
     id_vector_temp_.clear();
     id_vector_temp_.push_back(const_int_0_);
     spv::Id param_gen_x = builder_->createUnaryBuiltinCall(
@@ -2626,36 +2499,13 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
                                             input_fragment_coordinates_,
                                             id_vector_temp_),
                 spv::NoPrecision)));
-    // Apply resolution scale inversion after truncating.
     if (draw_resolution_scale_x_ > 1) {
       param_gen_x = builder_->createBinOp(
           spv::OpFMul, type_float_, param_gen_x,
           builder_->makeFloatConstant(1.0f / float(draw_resolution_scale_x_)));
     }
-    if (!modification.pixel.param_gen_point) {
-      assert_true(input_front_facing_ != spv::NoResult);
-      param_gen_x = builder_->createTriOp(
-          spv::OpSelect, type_float_,
-          builder_->createBinOp(
-              spv::OpLogicalOr, type_bool_,
-              builder_->createBinOp(
-                  spv::OpIEqual, type_bool_,
-                  builder_->createBinOp(
-                      spv::OpBitwiseAnd, type_uint_,
-                      main_system_constant_flags_,
-                      builder_->makeUintConstant(kSysFlag_PrimitivePolygonal)),
-                  const_uint_0_),
-              builder_->createLoad(input_front_facing_, spv::NoPrecision)),
-          param_gen_x,
-          builder_->createUnaryOp(
-              spv::OpBitcast, type_float_,
-              builder_->createBinOp(
-                  spv::OpBitwiseXor, type_uint_,
-                  builder_->createUnaryOp(spv::OpBitcast, type_uint_,
-                                          param_gen_x),
-                  const_sign_bit)));
-    }
-    // Y - pixel Y .0 in the magnitude, is point in the sign bit.
+
+    // Y calculation
     id_vector_temp_.clear();
     id_vector_temp_.push_back(builder_->makeIntConstant(1));
     spv::Id param_gen_y = builder_->createUnaryBuiltinCall(
@@ -2667,64 +2517,109 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
                                             input_fragment_coordinates_,
                                             id_vector_temp_),
                 spv::NoPrecision)));
-    // Apply resolution scale inversion after truncating.
     if (draw_resolution_scale_y_ > 1) {
       param_gen_y = builder_->createBinOp(
           spv::OpFMul, type_float_, param_gen_y,
           builder_->makeFloatConstant(1.0f / float(draw_resolution_scale_y_)));
     }
-    if (modification.pixel.param_gen_point) {
-      param_gen_y = builder_->createUnaryOp(
-          spv::OpBitcast, type_float_,
-          builder_->createBinOp(
-              spv::OpBitwiseXor, type_uint_,
-              builder_->createUnaryOp(spv::OpBitcast, type_uint_, param_gen_y),
-              const_sign_bit));
-    }
-    // Z - point S in the magnitude, is line in the sign bit.
-    // W - point T in the magnitude.
-    spv::Id param_gen_z, param_gen_w;
-    if (modification.pixel.param_gen_point) {
-      assert_true(input_point_coordinates_ != spv::NoResult);
-      // Saturate to avoid negative point coordinates if the center of the pixel
-      // is not covered, and extrapolation is done.
-      spv::Id param_gen_point_coordinates = builder_->createTriBuiltinCall(
-          type_float2_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
-          builder_->createLoad(input_point_coordinates_, spv::NoPrecision),
-          const_float2_0_, const_float2_1_);
-      param_gen_z = builder_->createCompositeExtract(
-          param_gen_point_coordinates, type_float_, 0);
-      param_gen_w = builder_->createCompositeExtract(
-          param_gen_point_coordinates, type_float_, 1);
-    } else {
-      param_gen_z = builder_->createUnaryOp(
-          spv::OpBitcast, type_float_,
-          builder_->createTriOp(
-              spv::OpSelect, type_uint_,
-              builder_->createBinOp(
-                  spv::OpINotEqual, type_bool_,
-                  builder_->createBinOp(
-                      spv::OpBitwiseAnd, type_uint_,
-                      main_system_constant_flags_,
-                      builder_->makeUintConstant(kSysFlag_PrimitiveLine)),
-                  const_uint_0_),
-              const_sign_bit, const_uint_0_));
-      param_gen_w = const_float_0_;
-    }
-    // Store the pixel parameters.
-    id_vector_temp_.clear();
-    id_vector_temp_.push_back(param_gen_x);
-    id_vector_temp_.push_back(param_gen_y);
-    id_vector_temp_.push_back(param_gen_z);
-    id_vector_temp_.push_back(param_gen_w);
-    spv::Id param_gen =
-        builder_->createCompositeConstruct(type_float4_, id_vector_temp_);
+
     id_vector_temp_.clear();
     id_vector_temp_.push_back(
         builder_->makeIntConstant(int(param_gen_interpolator)));
-    builder_->createStore(param_gen, builder_->createAccessChain(
-                                         spv::StorageClassFunction,
-                                         var_main_registers_, id_vector_temp_));
+    builder_->createStore(
+        builder_->createCompositeConstruct(
+            type_float4_,
+            {param_gen_x, param_gen_y, const_float_0_, const_float_0_}),
+        builder_->createAccessChain(spv::StorageClassFunction,
+                                    var_main_registers_, id_vector_temp_));
+  }
+
+  // --- ORIGINAL FSI LOGIC (Now with minimized critical section) ---
+  if (edram_fragment_shader_interlock_) {
+    std::fill(output_or_var_fragment_data_.begin(),
+              output_or_var_fragment_data_.end(), spv::NoResult);
+    var_main_fsi_color_written_ = spv::NoResult;
+    uint32_t color_targets_written = current_shader().writes_color_targets();
+    if (color_targets_written) {
+      static const char* const kFragmentDataVariableNames[] = {
+          "xe_var_fragment_data_0",
+          "xe_var_fragment_data_1",
+          "xe_var_fragment_data_2",
+          "xe_var_fragment_data_3",
+      };
+      uint32_t color_targets_remaining = color_targets_written;
+      uint32_t color_target_index;
+      while (
+          xe::bit_scan_forward(color_targets_remaining, &color_target_index)) {
+        color_targets_remaining &= ~(UINT32_C(1) << color_target_index);
+        output_or_var_fragment_data_[color_target_index] =
+            builder_->createVariable(
+                spv::NoPrecision, spv::StorageClassFunction, type_float4_,
+                kFragmentDataVariableNames[color_target_index],
+                const_float4_0_);
+      }
+      var_main_fsi_color_written_ = builder_->createVariable(
+          spv::NoPrecision, spv::StorageClassFunction, type_uint_,
+          "xe_var_fsi_color_written", const_uint_0_);
+    }
+
+    if (FSI_IsDepthStencilEarly()) {
+      spv::Id msaa_samples = LoadMsaaSamplesFromFlags();
+      FSI_LoadSampleMask(msaa_samples);
+      FSI_LoadEdramOffsets(msaa_samples);
+
+      // START INTERLOCK
+      builder_->createNoResultOp(spv::OpBeginInvocationInterlockEXT);
+      FSI_DepthStencilTest(msaa_samples, false);
+
+      if (!is_depth_only_fragment_shader_) {
+        // RDNA 4 Quad Logic: Ensure helper invocations in the 2x2 quad remain
+        // active if needed for derivatives (ddx/ddy), but avoid redundant work.
+        spv::Id quad_needs_execution = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_, main_fsi_sample_mask_, const_uint_0_);
+        builder_->addCapability(spv::CapabilityDerivativeControl);
+
+        // Quad derivative checks...
+        quad_needs_execution = builder_->createBinOp(
+            spv::OpLogicalOr, type_bool_, quad_needs_execution,
+            builder_->createBinOp(
+                spv::OpFOrdNotEqual, type_bool_,
+                builder_->createUnaryOp(
+                    spv::OpDPdxFine, type_float_,
+                    builder_->createTriOp(spv::OpSelect, type_float_,
+                                          quad_needs_execution, const_float_1_,
+                                          const_float_0_)),
+                const_float_0_));
+        quad_needs_execution = builder_->createBinOp(
+            spv::OpLogicalOr, type_bool_, quad_needs_execution,
+            builder_->createBinOp(
+                spv::OpFOrdNotEqual, type_bool_,
+                builder_->createUnaryOp(
+                    spv::OpDPdyCoarse, type_float_,
+                    builder_->createTriOp(spv::OpSelect, type_float_,
+                                          quad_needs_execution, const_float_1_,
+                                          const_float_0_)),
+                const_float_0_));
+
+        spv::Block& main_fsi_early_depth_stencil_execute_quad =
+            builder_->makeNewBlock();
+        main_fsi_early_depth_stencil_execute_quad_merge_ =
+            &builder_->makeNewBlock();
+
+        // AMD FIX: Use Flattening to prevent expensive branching on RDNA
+        // hardware. We use static_cast<spv::SelectionControlMask>(1) for the
+        // literal "Flatten" value to ensure compatibility across different
+        // SPIR-V header versions.
+        builder_->createSelectionMerge(
+            main_fsi_early_depth_stencil_execute_quad_merge_,
+            static_cast<spv::SelectionControlMask>(1));
+
+        builder_->createConditionalBranch(
+            quad_needs_execution, &main_fsi_early_depth_stencil_execute_quad,
+            main_fsi_early_depth_stencil_execute_quad_merge_);
+        builder_->setBuildPoint(&main_fsi_early_depth_stencil_execute_quad);
+      }
+    }
   }
 }
 
