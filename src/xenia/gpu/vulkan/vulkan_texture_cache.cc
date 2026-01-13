@@ -617,6 +617,7 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
   }
 }
 
+
 VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(
     uint32_t fetch_constant_index, xenos::FetchOpDimension dimension,
     bool is_signed) const {
@@ -665,9 +666,9 @@ VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(
     // View creation failed – return matching null view.
     switch (dimension) {
       case xenos::FetchOpDimension::k3DOrStacked:
-        return null_image_view_3d_;  
+        return null_image_view_3d_;
       case xenos::FetchOpDimension::kCube:
-        return null_image_view_cube_;  
+        return null_image_view_cube_;
       default:
         return null_image_view_2d_array_;
     }
@@ -675,7 +676,6 @@ VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(
 
   return view;
 }
-
 VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
     const VulkanShader::SamplerBinding& binding) const {
   const auto& regs = register_file();
