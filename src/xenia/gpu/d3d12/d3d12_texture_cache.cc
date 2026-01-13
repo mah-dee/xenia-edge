@@ -1307,11 +1307,11 @@ void D3D12TextureCache::CreateCurrentScaledResolveRangeUintPow2UAV(
       (scaled_resolve_current_range_start_scaled_ -
        (uint64_t(buffer_index) << 30)) >>
           element_size_bytes_pow2);
-}
+}   
 
 ID3D12Resource* D3D12TextureCache::RequestSwapTexture(
     D3D12_SHADER_RESOURCE_VIEW_DESC& srv_desc_out,
-    xenos::TextureFormat& format_out) {
+    xenos::TextureFormat& format_out) {   
   const auto& regs = register_file();
   xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(0);
   TextureKey key;

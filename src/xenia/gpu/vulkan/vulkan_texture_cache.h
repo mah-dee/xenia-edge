@@ -255,7 +255,7 @@ class VulkanTextureCache final : public TextureCache {
 
   class VulkanTexture final : public Texture {
    public:
-
+     
     enum class Usage {
       kUndefined,
       kTransferDestination,

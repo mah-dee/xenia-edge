@@ -450,7 +450,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
   }
 
   LoadTexturesData(textures_to_load, num_textures_to_load);
-
+     
   if (bindings_changed) {
     UpdateTextureBindingsImpl(bindings_changed);
   }

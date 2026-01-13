@@ -11,7 +11,7 @@
 #define XENIA_GPU_SPIRV_SHADER_TRANSLATOR_H_
 
 #include <array>
-#include <cstdint>
+#include <cstdint>  
 #include <memory>
 #include <string>
 #include <utility>

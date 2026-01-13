@@ -665,9 +665,9 @@ VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(
     // View creation failed – return matching null view.
     switch (dimension) {
       case xenos::FetchOpDimension::k3DOrStacked:
-        return null_image_view_3d_;
+        return null_image_view_3d_;  
       case xenos::FetchOpDimension::kCube:
-        return null_image_view_cube_;
+        return null_image_view_cube_;  
       default:
         return null_image_view_2d_array_;
     }

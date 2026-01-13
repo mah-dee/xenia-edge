@@ -1832,7 +1832,7 @@ void SpirvShaderTranslator::FSI_DepthStencilTest(
     builder_->createSelectionMerge(block_any_sample_covered_merge,
                                    spv::SelectionControlDontFlattenMask);
     builder_->createConditionalBranch(any_sample_covered,
-                                      block_any_sample_covered,
+                                      block_any_sample_covered,  
                                       block_any_sample_covered_merge);
     builder_->setBuildPoint(block_any_sample_covered);
   }

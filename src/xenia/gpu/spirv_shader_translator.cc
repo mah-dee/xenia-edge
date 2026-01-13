@@ -982,7 +982,7 @@ void SpirvShaderTranslator::PostTranslation() {
       // For a stable hash.
       std::memset(&shader_binding, 0, sizeof(shader_binding));
       shader_binding.fetch_constant = translator_binding.fetch_constant;
-      shader_binding.dimension = translator_binding.dimension;
+      shader_binding.dimension = translator_binding.dimension;  
       shader_binding.is_signed = translator_binding.is_signed;
       spirv_shader->used_texture_mask_ |= UINT32_C(1)
                                           << translator_binding.fetch_constant;
@@ -990,7 +990,7 @@ void SpirvShaderTranslator::PostTranslation() {
     spirv_shader->sampler_bindings_.clear();
     spirv_shader->sampler_bindings_.reserve(sampler_bindings_.size());
     for (const SamplerBinding& translator_binding : sampler_bindings_) {
-      SpirvShader::SamplerBinding& shader_binding =
+      SpirvShader::SamplerBinding& shader_binding =  
           spirv_shader->sampler_bindings_.emplace_back();
       shader_binding.fetch_constant = translator_binding.fetch_constant;
       shader_binding.mag_filter = translator_binding.mag_filter;

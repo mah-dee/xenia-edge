@@ -707,7 +707,7 @@ class Shader {
     // Fetch constant index [0-95].
     uint32_t fetch_constant;
     // Stride of the entire binding, in words.
-    uint32_t stride_words;
+    uint32_t stride_words;  
     // Packed attributes within the binding buffer.
     std::vector<Attribute> attributes;
   };
@@ -718,7 +718,7 @@ class Shader {
     // Fetch constant index [0-31].
     uint32_t fetch_constant;
    // Fetch instruction with all parameters.
-    ParsedTextureFetchInstruction fetch_instr;
+    ParsedTextureFetchInstruction fetch_instr;   
   };
 
   struct ConstantRegisterMap {
