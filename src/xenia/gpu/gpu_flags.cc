@@ -182,3 +182,8 @@ DEFINE_bool(
     "improve image quality in some cases but can break games that rely on "
     "reading back specific pixel values (e.g., for gamma detection).",
     "GPU");
+
+DEFINE_bool(gpu_3d_to_2d_texture, true,
+            "Handle shaders that sample 3D textures as 2D by creating a 2D "
+            "texture from slice 0 of the guest memory.",
+            "GPU");
