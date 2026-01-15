@@ -332,15 +332,6 @@ void TextureCache::CompletedSubmissionUpdated(
   }
 }
 
-
-
-
-
-
-
-
-
-
 void TextureCache::BeginSubmission(uint64_t new_submission_index) {
   assert_true(new_submission_index > current_submission_index_);
   current_submission_index_ = new_submission_index;
