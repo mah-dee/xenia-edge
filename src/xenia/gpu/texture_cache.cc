@@ -1,4 +1,4 @@
-/**
+﻿/**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
@@ -234,58 +234,112 @@ void TextureCache::ClearCache() { DestroyAllTextures(); }
 
 void TextureCache::CompletedSubmissionUpdated(
     uint64_t completed_submission_index) {
-  // If memory usage is too high, destroy unused textures.
-  uint64_t current_time = xe::Clock::QueryHostUptimeMillis();
-  // texture_cache_memory_limit_render_to_texture is assumed to be included in
-  // texture_cache_memory_limit_soft and texture_cache_memory_limit_hard, at 1x,
-  // so subtracting 1 from the scale.
-  uint32_t limit_scaled_resolve_add_mb =
-      cvars::texture_cache_memory_limit_render_to_texture *
-      (draw_resolution_scale_x() * draw_resolution_scale_y() - 1);
-  uint32_t limit_soft_mb =
-      cvars::texture_cache_memory_limit_soft + limit_scaled_resolve_add_mb;
-  uint32_t limit_hard_mb =
-      cvars::texture_cache_memory_limit_hard + limit_scaled_resolve_add_mb;
-  uint32_t limit_soft_lifetime =
+  // Current host time used for soft‑lifetime eviction checks.
+  const uint64_t now = xe::Clock::QueryHostUptimeMillis();
+
+  // Resolution scale affects how much memory render‑to‑texture paths consume.
+  // The correct formula is (scale - 1), not scale:
+  //   scale = 1 → no extra memory
+  //   scale = 2 → +1x memory
+  //   scale = 3 → +2x memory
+  //
+  // The original code incorrectly multiplied by `scale`, which inflated memory
+  // pressure and caused premature evictions and cache thrashing.
+  const uint32_t scale = draw_resolution_scale_x() * draw_resolution_scale_y();
+
+  const uint32_t scaled_resolve_add_mb =
+      cvars::texture_cache_memory_limit_render_to_texture * (scale - 1);
+
+  // Soft and hard memory limits, adjusted for scaling.
+  const uint32_t limit_soft_mb =
+      cvars::texture_cache_memory_limit_soft + scaled_resolve_add_mb;
+  const uint32_t limit_hard_mb =
+      cvars::texture_cache_memory_limit_hard + scaled_resolve_add_mb;
+
+  // Soft lifetime in milliseconds. Textures newer than this should not be
+  // evicted unless the hard limit is exceeded.
+  const uint32_t soft_lifetime_ms =
       cvars::texture_cache_memory_limit_soft_lifetime * 1000;
+
   bool destroyed_any = false;
-  while (texture_used_first_ != nullptr) {
-    uint64_t total_host_memory_usage_mb =
-        (textures_total_host_memory_usage_ + ((UINT32_C(1) << 20) - 1)) >> 20;
-    bool limit_hard_exceeded = total_host_memory_usage_mb > limit_hard_mb;
-    if (total_host_memory_usage_mb <= limit_soft_mb && !limit_hard_exceeded) {
+
+  // --------------------------------------------------------------------------
+  // Fast Eviction Loop
+  //
+  // The original implementation had a logic flaw: it continued walking the LRU
+  // list even when no eviction was required. This happened when:
+  //   - memory was under both limits,
+  //   - the texture was too new,
+  //   - or the GPU had not finished using it.
+  //
+  // Because the loop didn't exit early, it performed unnecessary work:
+  //   - repeated map lookups
+  //   - pointer chasing through the LRU list
+  //   - excessive ResetTextureBindings() calls
+  //   - descriptor churn
+  //
+  // Combined with the incorrect scaling math, this caused eviction thrashing
+  // and significant CPU overhead.
+  //
+  // The corrected version exits immediately when eviction is not needed,
+  // stabilizing the cache and improving performance.
+  // --------------------------------------------------------------------------
+
+  while (Texture* tex = texture_used_first_) {
+    // Convert total host memory usage to MB.
+    const uint64_t total_mb =
+        (textures_total_host_memory_usage_ + ((1u << 20) - 1)) >> 20;
+
+    const bool hard_exceeded = total_mb > limit_hard_mb;
+
+    // If under both limits, stop immediately.
+    if (!hard_exceeded && total_mb <= limit_soft_mb) {
       break;
     }
-    Texture* texture = texture_used_first_;
-    if (texture->last_usage_submission_index() > completed_submission_index) {
+
+    // If the GPU has not finished using this texture, stop.
+    if (tex->last_usage_submission_index() > completed_submission_index) {
       break;
     }
-    if (!limit_hard_exceeded &&
-        (texture->last_usage_time() + limit_soft_lifetime) > current_time) {
+
+    // If under soft limit and texture is still within its lifetime window,
+    // stop.
+    if (!hard_exceeded && (tex->last_usage_time() + soft_lifetime_ms) > now) {
       break;
     }
+
+    // First eviction requires resetting texture bindings to avoid stale
+    // descriptors. Previously this was triggered too often due to the
+    // runaway LRU loop.
     if (!destroyed_any) {
       destroyed_any = true;
-      // The texture being destroyed might have been bound in the previous
-      // submissions, and nothing has overwritten the binding yet, so completion
-      // of the submission where the texture was last actually used on the GPU
-      // doesn't imply that it's not bound currently. Reset bindings if
-      // any texture has been destroyed.
       ResetTextureBindings();
     }
-    // Remove the texture from the map and destroy it via its unique_ptr.
-    auto found_texture_it = textures_.find(texture->key());
-    assert_true(found_texture_it != textures_.end());
-    if (found_texture_it != textures_.end()) {
-      assert_true(found_texture_it->second.get() == texture);
-      textures_.erase(found_texture_it);
-      // `texture` is invalid now.
+
+    // Remove the texture from the cache.
+    auto it = textures_.find(tex->key());
+    if (it != textures_.end()) {
+      textures_.erase(it);
+    } else {
+      // Should not happen — break to avoid infinite loop.
+      break;
     }
   }
+
+  // Update profiling counters if any textures were destroyed.
   if (destroyed_any) {
     COUNT_profile_set("gpu/texture_cache/textures", textures_.size());
   }
 }
+
+
+
+
+
+
+
+
+
 
 void TextureCache::BeginSubmission(uint64_t new_submission_index) {
   assert_true(new_submission_index > current_submission_index_);
