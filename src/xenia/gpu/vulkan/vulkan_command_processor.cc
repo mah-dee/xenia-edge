@@ -2984,6 +2984,19 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
+    // *** BLUE DRAGON FIX ***
+  // Detect obviously invalid index counts (e.g., 65534) caused by corrupted or
+  // aliased index buffers. Skipping this draw prevents vertex explosions.
+  if (index_count >= 0xFFFE) {
+    /* XELOGE(
+        "Vulkan: Skipping DrawIndexed with suspicious index_count={} "
+        "(likely corrupted / aliased index buffer).",
+        index_count);*/
+    return true;  // Skip safely.
+  }
+  // *** END FIX ***
+
+
   const RegisterFile& regs = *register_file_;
 
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;

@@ -2754,6 +2754,20 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
+    // *** BLUE DRAGON FIX ***
+  // Detect obviously invalid index counts (e.g., 65534) caused by corrupted or
+  // aliased index buffers. Skipping this draw prevents vertex explosions.
+  if (index_count >= 0xFFFE) {
+    /* XELOGE(
+        "D3D12: Skipping DrawIndexed with suspicious index_count={} "
+        "(likely corrupted / aliased index buffer).",
+        index_count);*/
+    return true;  // Skip safely.
+  }
+  // *** END FIX ***
+
+
+
   ID3D12Device* device = GetD3D12Provider().GetDevice();
   const RegisterFile& regs = *register_file_;
 
